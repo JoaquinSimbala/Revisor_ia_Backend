@@ -16,7 +16,7 @@ export class LLMService {
    * @param {object} params.githubContext
    * @returns {Promise<{ explanation: string, replacement_code: string, compatibility_notes: string }>}
    */
-  async analyzeCodeChange({ filePath, language, deletedCode, surroundingContext, githubContext }) {
+  async analyzeCodeChange({ filePath, language, deletedCode, lineRange, surroundingContext, githubContext }) {
     const key = this.apiKey || process.env.GEMINI_API_KEY;
 
     if (!key) {
@@ -28,35 +28,49 @@ export class LLMService {
       };
     }
 
-    const systemPrompt = `Eres un arquitecto de software senior y experto en refactorización y análisis estático de código.
-El desarrollador está editando el archivo "${filePath}" (${language}). Acaba de modificar o borrar un fragmento de código.
+    const lineCount = (deletedCode || '').split('\n').length;
+    const scopeDescription = lineRange ? `${lineRange} (${lineCount} línea(s))` : `${lineCount} línea(s)`;
 
-Tu misión es realizar un análisis TÉCNICO PROFUNDO, PRECISO y CONCRETO (NADA de respuestas genéricas o ambiguas).
+    const systemPrompt = `Eres un arquitecto de software senior y especialista en refactorización quirúrgica de código limpio.
+El desarrollador está editando "${filePath}" (${language}).
+Acaba de seleccionar/modificar/borrar un fragmento específico: ${scopeDescription}.
 
-Debes devolver EXCLUSIVAMENTE un objeto JSON válido con la siguiente estructura:
-{
-  "explanation": "Explicación detallada y exhaustiva en markdown: 1) Qué hacía exactamente cada línea del código eliminado (variables, eventos, llamadas). 2) Qué consecuencias o efectos colaterales produce su eliminación (rotura de estado, dependencias, eventos no manejados, índices faltantes). 3) Por qué la propuesta de sustitución es superior.",
-  "replacement_code": "Una versión mejorada, limpia y moderna del código. NO devuelvas el mismo código tal cual. Aplica buenas prácticas (manejo robusto de errores, tipado o validaciones defensivas, optimizaciones o sintaxis moderna) pero asegurando compatibilidad total con el resto del archivo.",
-  "compatibility_notes": "Puntos técnicos clave sobre: firmas de funciones, tipos devueltos, argumentos requeridos y cómo encaja con el código adyacente para no causar breaking changes."
-}`;
+REGLAS QUIRÚRGICAS ESTRICTAS (DE CUMPLIMIENTO OBLIGATORIO):
+1. REEMPLAZO EXACTO 1:1 (DROP-IN REPLACEMENT):
+   Tu "replacement_code" debe reemplazar ÚNICA Y EXCLUSIVAMENTE el fragmento intervenido (${scopeDescription}).
+   - Si el desarrollador modificó 1 sola línea o 1 sola palabra/expresión, tu "replacement_code" debe contener EXACTAMENTE esa 1 línea o expresión mejorada.
+   - Si modificó 3 líneas, tu "replacement_code" debe ser el equivalente estricto de esas 3 líneas.
+   - Si modificó 50 o 100 líneas, tu "replacement_code" debe corresponder a esas 50 o 100 líneas.
+   - JAMÁS devuelvas el archivo entero ni funciones externas circundantes que el usuario no borró.
+   - El desarrollador copiará "replacement_code" y lo pegará DIRECTAMENTE sobre el espacio que dejó el fragmento intervenido. Debe encajar a la perfección sin líneas duplicadas.
+
+2. CÓDIGO MEJORADO Y SIN BREAKING CHANGES:
+   El código propuesto debe ser limpio, moderno, robusto y respetar los nombres de variables, argumentos y tipos esperados por el resto del archivo para que funcione inmediatamente al pegarlo.
+
+3. FORMATO JSON OBLIGATORIO:
+   Devuelve ÚNICAMENTE un objeto JSON con:
+   - "explanation": Análisis técnico didáctico de qué hacía exactamente ese fragmento específico de ${scopeDescription} y el impacto de su alteración.
+   - "replacement_code": El fragmento de código quirúrgico listo para sustitución directa.
+   - "compatibility_notes": Garantías de tipado, parámetros y firmas de métodos.`;
 
     const userContent = `
 ARCHIVO: ${filePath}
+UBICACIÓN: ${scopeDescription}
 LENGUAJE: ${language || 'javascript'}
 
-CÓDIGO ELIMINADO / MODIFICADO:
+FRAGMENTO EXACTO MODIFICADO O BORRADO (Sustituir quirúrgicamente esto):
 \`\`\`${language}
 ${deletedCode}
 \`\`\`
 
-CONTEXTO CIRCUNDANTE DEL ARCHIVO (Líneas adyacentes):
+CONTEXTO CIRCUNDANTE DEL ARCHIVO (Líneas adyacentes de referencia - NO las incluyas en replacement_code):
 \`\`\`${language}
 ${surroundingContext}
 \`\`\`
 
 ${githubContext?.relevantTypes ? `CONTEXTO DE REPOSITORIO: ${githubContext.relevantTypes}` : ''}
 
-Recuerda: Devuelve ÚNICAMENTE el objeto JSON sin bloques de markdown adicionales.`;
+Recuerda: Tu "replacement_code" debe reemplazar ÚNICAMENTE el fragmento intervenido de ${scopeDescription}. Devuelve solo el objeto JSON sin bloques de markdown envolventes.`;
 
     // Lista de modelos ordenados por estabilidad y disponibilidad para sortear picos de demanda (503)
     const modelsToTry = [

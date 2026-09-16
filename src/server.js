@@ -165,7 +165,7 @@ io.on('connection', (socket) => {
    * 3. El CLI transmite un diff detectado
    */
   socket.on('cli_event_diff', async (payload) => {
-    const { roomId, filePath, language, deletedCode, surroundingContext } = payload;
+    const { roomId, filePath, language, deletedCode, surroundingContext, lineRange } = payload;
     const session = roomManager.getRoom(roomId);
 
     if (!session) {
@@ -173,14 +173,15 @@ io.on('connection', (socket) => {
       return;
     }
 
-    console.log(`[Diff] Recibido cambio en ${filePath} (${(deletedCode || '').length} chars) para sala ${roomId}`);
+    console.log(`[Diff] Recibido cambio en ${filePath} (${lineRange || 'modificado'}, ${(deletedCode || '').length} chars) para sala ${roomId}`);
 
     // Notificar inmediatamente al móvil que el análisis está en curso
     if (session.mobileSocketId) {
       io.to(session.mobileSocketId).emit('status_update', {
         status: 'analyzing',
-        message: `Analizando cambios en ${filePath}...`,
+        message: `Analizando ${lineRange || 'cambios'} en ${filePath}...`,
         filePath,
+        lineRange,
         timestamp: Date.now()
       });
     }
@@ -197,6 +198,7 @@ io.on('connection', (socket) => {
         filePath,
         language,
         deletedCode,
+        lineRange,
         surroundingContext,
         githubContext
       });
@@ -207,6 +209,7 @@ io.on('connection', (socket) => {
           filePath,
           language,
           deletedCode,
+          lineRange: lineRange || '',
           surroundingContext,
           explanation: analysis.explanation,
           replacement_code: analysis.replacement_code,
