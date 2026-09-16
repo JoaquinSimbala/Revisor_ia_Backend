@@ -58,8 +58,15 @@ ${githubContext?.relevantTypes ? `CONTEXTO DE REPOSITORIO: ${githubContext.relev
 
 Recuerda: Devuelve ÚNICAMENTE el objeto JSON sin bloques de markdown adicionales.`;
 
-    // Modelos en orden de preferencia según la recomendación de Google API
-    let modelsToTry = ['gemini-3.6-flash', 'gemini-2.5-flash'];
+    // Lista de modelos ordenados por estabilidad y disponibilidad para sortear picos de demanda (503)
+    const modelsToTry = [
+      'gemini-flash-latest',     // Alias oficial de Google que siempre apunta al Flash más estable disponible
+      'gemini-3.5-flash',        // Modelo 3.5 de alta disponibilidad
+      'gemini-3.7-flash',        // Modelo 3.7
+      'gemini-3.6-flash',        // Modelo 3.6
+      'gemini-3.5-flash-lite',   // Modelo ligero ultrarrápido
+      'gemini-flash-lite-latest' // Alias oficial de Google para Flash Lite
+    ];
 
     for (const model of modelsToTry) {
       try {
@@ -85,8 +92,8 @@ Recuerda: Devuelve ÚNICAMENTE el objeto JSON sin bloques de markdown adicionale
 
         if (!response.ok) {
           const errBody = await response.text();
-          console.error(`[LLMService] Error HTTP ${response.status} en ${model}:`, errBody);
-          continue; // Probar siguiente modelo
+          console.warn(`[LLMService] Modelo ${model} respondió status ${response.status}. Intentando siguiente alternativa...`);
+          continue; // Probar siguiente modelo automáticamente ante 503 o 404
         }
 
         const data = await response.json();
@@ -101,23 +108,30 @@ Recuerda: Devuelve ÚNICAMENTE el objeto JSON sin bloques de markdown adicionale
           }
         }
       } catch (err) {
-        console.error(`[LLMService] Excepción consultando ${model}:`, err.message);
+        console.warn(`[LLMService] Excepción en ${model} (${err.message}). Intentando siguiente...`);
       }
     }
 
-    // Si los modelos anteriores fallan, consultar dinámicamente qué modelos tiene activos la clave
+    // Respaldo dinámico en caso de que todos los anteriores tengan sobrecarga simultánea
     try {
-      console.log('[LLMService] Consultando lista de modelos activos en Google AI Studio...');
+      console.log('[LLMService] Buscando modelos de texto alternativos en tu cuenta...');
       const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
       if (listRes.ok) {
         const listData = await listRes.json();
-        const availableModels = (listData.models || [])
-          .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
-          .map(m => m.name.replace(/^models\//, ''));
+        const validTextModels = (listData.models || [])
+          .map(m => m.name.replace(/^models\//, ''))
+          .filter(name => 
+            (name.includes('flash') || name.includes('pro')) &&
+            !name.includes('tts') &&
+            !name.includes('image') &&
+            !name.includes('audio') &&
+            !name.includes('transcribe') &&
+            !name.includes('2.5') // Excluir 2.5 obsoleto
+          );
 
-        console.log('[LLMService] Modelos compatibles detectados:', availableModels);
+        console.log('[LLMService] Modelos de texto filtrados:', validTextModels);
 
-        for (const dynModel of availableModels.slice(0, 3)) {
+        for (const dynModel of validTextModels.slice(0, 5)) {
           const dynUrl = `https://generativelanguage.googleapis.com/v1beta/models/${dynModel}:generateContent?key=${key}`;
           const dynResp = await fetch(dynUrl, {
             method: 'POST',
