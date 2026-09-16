@@ -58,8 +58,8 @@ ${githubContext?.relevantTypes ? `CONTEXTO DE REPOSITORIO: ${githubContext.relev
 
 Recuerda: Devuelve ÚNICAMENTE el objeto JSON sin bloques de markdown adicionales.`;
 
-    // Probar modelos en orden de preferencia: gemini-2.0-flash, gemini-1.5-flash
-    const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash'];
+    // Modelos en orden de preferencia según la recomendación de Google API
+    let modelsToTry = ['gemini-3.6-flash', 'gemini-2.5-flash'];
 
     for (const model of modelsToTry) {
       try {
@@ -96,13 +96,54 @@ Recuerda: Devuelve ÚNICAMENTE el objeto JSON sin bloques de markdown adicionale
           const cleanJson = rawText.trim().replace(/^```json\s*/, '').replace(/\s*```$/, '');
           const parsed = JSON.parse(cleanJson);
           if (parsed.explanation && parsed.replacement_code) {
-            console.log(`[LLMService] Análisis exitoso con ${model}`);
+            console.log(`[LLMService] ✓ Análisis exitoso con modelo: ${model}`);
             return parsed;
           }
         }
       } catch (err) {
         console.error(`[LLMService] Excepción consultando ${model}:`, err.message);
       }
+    }
+
+    // Si los modelos anteriores fallan, consultar dinámicamente qué modelos tiene activos la clave
+    try {
+      console.log('[LLMService] Consultando lista de modelos activos en Google AI Studio...');
+      const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        const availableModels = (listData.models || [])
+          .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
+          .map(m => m.name.replace(/^models\//, ''));
+
+        console.log('[LLMService] Modelos compatibles detectados:', availableModels);
+
+        for (const dynModel of availableModels.slice(0, 3)) {
+          const dynUrl = `https://generativelanguage.googleapis.com/v1beta/models/${dynModel}:generateContent?key=${key}`;
+          const dynResp = await fetch(dynUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\n${userContent}` }] }],
+              generationConfig: { temperature: 0.2, responseMimeType: 'application/json' }
+            })
+          });
+
+          if (dynResp.ok) {
+            const dynData = await dynResp.json();
+            const dynText = dynData.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (dynText) {
+              const cleanJson = dynText.trim().replace(/^```json\s*/, '').replace(/\s*```$/, '');
+              const parsed = JSON.parse(cleanJson);
+              if (parsed.explanation && parsed.replacement_code) {
+                console.log(`[LLMService] ✓ Análisis exitoso con modelo dinámico: ${dynModel}`);
+                return parsed;
+              }
+            }
+          }
+        }
+      }
+    } catch (discoveryErr) {
+      console.error('[LLMService] Error en descubrimiento dinámico:', discoveryErr.message);
     }
 
     // Si fallan las llamadas a la API (por cuota o clave inválida)
