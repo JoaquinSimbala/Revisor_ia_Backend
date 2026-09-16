@@ -1,23 +1,19 @@
 /**
  * RoomManager: Gestor de sesiones efímeras en memoria RAM (Zero Storage).
  * No persiste nada en disco ni bases de datos.
+ * Incluye tolerancia a minimizado móvil y reconexión transparente.
  */
 
 class RoomManager {
   constructor() {
-    /** @type {Map<string, { roomId: string, githubRepo: string, mobileSocketId: string|null, cliSocketId: string|null, createdAt: number }>} */
+    /** @type {Map<string, { roomId: string, githubRepo: string, mobileSocketId: string|null, cliSocketId: string|null, createdAt: number, expireTimer?: any }>} */
     this.rooms = new Map();
-    /** @type {Map<string, string>} Mapeo inverso de socketId -> roomId para desconexiones ultrarrápidas */
+    /** @type {Map<string, string>} Mapeo inverso de socketId -> roomId */
     this.socketToRoom = new Map();
   }
 
-  /**
-   * Genera un código de sala alfanumérico único de 4 a 6 caracteres.
-   * @param {number} length 
-   * @returns {string}
-   */
   generateRoomCode(length = 4) {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Excluye 0, O, 1, I para evitar ambigüedades
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
     let attempts = 0;
     do {
@@ -32,16 +28,7 @@ class RoomManager {
     return code;
   }
 
-  /**
-   * Crea una nueva sala efímera asociada a un cliente móvil.
-   * @param {string} mobileSocketId 
-   * @param {string} githubRepo 
-   * @returns {string} roomId
-   */
   createRoom(mobileSocketId, githubRepo = '') {
-    // Si el socket ya tenía una sala previa, la cerramos
-    this.cleanupSocket(mobileSocketId);
-
     const roomId = this.generateRoomCode(4);
     const session = {
       roomId,
@@ -57,12 +44,6 @@ class RoomManager {
     return roomId;
   }
 
-  /**
-   * Une un CLI Watcher a una sala existente.
-   * @param {string} roomId 
-   * @param {string} cliSocketId 
-   * @returns {{ success: boolean, error?: string, session?: object }}
-   */
   joinRoom(roomId, cliSocketId) {
     const normalizedRoom = roomId.trim().toUpperCase();
     const session = this.rooms.get(normalizedRoom);
@@ -78,17 +59,36 @@ class RoomManager {
   }
 
   /**
-   * Obtiene la sesión por ID de sala.
-   * @param {string} roomId 
+   * Permite al móvil reconectarse a su sala tras volver de segundo plano/minimizado.
    */
+  rejoinMobile(roomId, newSocketId) {
+    const normalizedRoom = roomId.trim().toUpperCase();
+    const session = this.rooms.get(normalizedRoom);
+
+    if (!session) {
+      return { success: false, error: 'Sala no encontrada' };
+    }
+
+    // Cancelar temporizador de expiración por inactividad si existía
+    if (session.expireTimer) {
+      clearTimeout(session.expireTimer);
+      session.expireTimer = null;
+    }
+
+    // Actualizar mapeos
+    if (session.mobileSocketId) {
+      this.socketToRoom.delete(session.mobileSocketId);
+    }
+    session.mobileSocketId = newSocketId;
+    this.socketToRoom.set(newSocketId, normalizedRoom);
+
+    return { success: true, session };
+  }
+
   getRoom(roomId) {
     return this.rooms.get(roomId?.trim().toUpperCase()) || null;
   }
 
-  /**
-   * Obtiene la sesión asociada a cualquier socket (móvil o CLI).
-   * @param {string} socketId 
-   */
   getRoomBySocket(socketId) {
     const roomId = this.socketToRoom.get(socketId);
     if (!roomId) return null;
@@ -96,17 +96,15 @@ class RoomManager {
   }
 
   /**
-   * Elimina un socket y destruye la sala asociada en RAM.
-   * @param {string} socketId 
-   * @returns {{ roomId: string, affectedPeerSocketId: string|null, role: 'mobile'|'cli' }|null}
+   * Desconexión transitoria: NO destruye la sala de inmediato para tolerar
+   * que el usuario minimice la app o bloquee la pantalla del celular.
    */
-  cleanupSocket(socketId) {
+  handleDisconnect(socketId) {
     const roomId = this.socketToRoom.get(socketId);
     if (!roomId) return null;
 
     this.socketToRoom.delete(socketId);
     const session = this.rooms.get(roomId);
-
     if (!session) return null;
 
     let role = 'mobile';
@@ -114,24 +112,39 @@ class RoomManager {
 
     if (session.mobileSocketId === socketId) {
       role = 'mobile';
+      session.mobileSocketId = null;
       affectedPeerSocketId = session.cliSocketId;
+
+      // Dar una ventana de gracia de 15 minutos para reconexión móvil
+      if (session.expireTimer) clearTimeout(session.expireTimer);
+      session.expireTimer = setTimeout(() => {
+        console.log(`[Room] Expirando sala ${roomId} por inactividad prolongada.`);
+        this.destroyRoom(roomId);
+      }, 15 * 60 * 1000);
+
     } else if (session.cliSocketId === socketId) {
       role = 'cli';
+      session.cliSocketId = null;
       affectedPeerSocketId = session.mobileSocketId;
     }
 
-    // Al ser stateless, destruimos la sala completamente si el móvil se desconecta
-    // O limpiamos la referencia del CLI si solo fue el CLI
-    if (role === 'mobile') {
-      if (session.cliSocketId) {
-        this.socketToRoom.delete(session.cliSocketId);
-      }
-      this.rooms.delete(roomId);
-    } else {
-      session.cliSocketId = null;
-    }
-
     return { roomId, affectedPeerSocketId, role };
+  }
+
+  /**
+   * Cierre explícito (cuando el usuario pulsa el botón '✕ Desconectar').
+   */
+  destroyRoom(roomId) {
+    const normalizedRoom = roomId.trim().toUpperCase();
+    const session = this.rooms.get(normalizedRoom);
+    if (!session) return null;
+
+    if (session.expireTimer) clearTimeout(session.expireTimer);
+    if (session.mobileSocketId) this.socketToRoom.delete(session.mobileSocketId);
+    if (session.cliSocketId) this.socketToRoom.delete(session.cliSocketId);
+
+    this.rooms.delete(normalizedRoom);
+    return session;
   }
 }
 

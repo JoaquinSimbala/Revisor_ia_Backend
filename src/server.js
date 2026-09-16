@@ -25,7 +25,9 @@ const io = new Server(server, {
   cors: {
     origin: '*',
     methods: ['GET', 'POST']
-  }
+  },
+  pingTimeout: 60000, // Tolerancia a redes móviles y minimizado de pestañas
+  pingInterval: 25000
 });
 
 const PORT = process.env.PORT || 3000;
@@ -74,6 +76,49 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('[Room] Error creando sala:', err);
       if (typeof callback === 'function') callback({ success: false, error: err.message });
+    }
+  });
+
+  /**
+   * 1.1 Reconexión móvil transparente al volver de segundo plano / pestaña minimizada
+   */
+  socket.on('rejoin_mobile', ({ roomId }, callback) => {
+    try {
+      const result = roomManager.rejoinMobile(roomId, socket.id);
+      if (!result.success) {
+        if (typeof callback === 'function') callback({ success: false, error: result.error });
+        return;
+      }
+
+      socket.join(roomId.toUpperCase());
+      console.log(`[Room] Móvil ${socket.id} reconectado con éxito a la sala ${roomId}`);
+
+      const resp = {
+        success: true,
+        roomId: roomId.toUpperCase(),
+        hasCli: !!result.session.cliSocketId
+      };
+
+      if (typeof callback === 'function') callback(resp);
+      socket.emit('rejoined_success', resp);
+    } catch (err) {
+      console.error('[Room] Error en rejoin_mobile:', err);
+      if (typeof callback === 'function') callback({ success: false, error: err.message });
+    }
+  });
+
+  /**
+   * 1.2 Desconexión explícita solicitada por el usuario (Botón [✕ Desconectar])
+   */
+  socket.on('close_session', ({ roomId }) => {
+    console.log(`[Room] Sesión ${roomId} finalizada manualmente por el usuario desde el móvil.`);
+    const session = roomManager.destroyRoom(roomId);
+
+    if (session && session.cliSocketId) {
+      io.to(session.cliSocketId).emit('peer_disconnected', {
+        role: 'mobile',
+        message: 'La sesión fue cerrada manualmente por el usuario desde el móvil.'
+      });
     }
   });
 
@@ -184,22 +229,18 @@ io.on('connection', (socket) => {
   });
 
   /**
-   * 4. Desconexión: Limpieza inmediata en RAM (Zero Storage)
+   * 4. Desconexión transitoria (Zero Storage con tolerancia a minimizado)
    */
   socket.on('disconnect', () => {
-    console.log(`[Socket] Desconectado: ${socket.id}`);
-    const cleanupResult = roomManager.cleanupSocket(socket.id);
+    console.log(`[Socket] Desconexión de socket: ${socket.id}`);
+    const result = roomManager.handleDisconnect(socket.id);
 
-    if (cleanupResult) {
-      const { roomId, affectedPeerSocketId, role } = cleanupResult;
-      console.log(`[Room] Sala ${roomId} actualizada por desconexión de ${role} (${socket.id})`);
-
-      if (affectedPeerSocketId) {
-        io.to(affectedPeerSocketId).emit('peer_disconnected', {
-          role,
-          message: role === 'mobile' 
-            ? 'El dispositivo móvil se ha desconectado. La sala en RAM ha sido destruida.' 
-            : 'El CLI local se ha desconectado. Esperando nueva reconexión...'
+    if (result && result.role === 'cli') {
+      // Si fue el CLI quien se desconectó, avisar al móvil
+      if (result.affectedPeerSocketId) {
+        io.to(result.affectedPeerSocketId).emit('peer_disconnected', {
+          role: 'cli',
+          message: 'El CLI local se ha desconectado. Esperando reconexión...'
         });
       }
     }
