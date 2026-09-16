@@ -9,6 +9,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import fs from 'fs';
 import { roomManager } from './roomManager.js';
 import { githubService } from './githubService.js';
 import { llmService } from './llmService.js';
@@ -32,9 +33,11 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Servir la Web App móvil directamente desde el backend
+// Servir la Web App móvil solo si existe localmente (en producción el frontend está desacoplado)
 const webPath = path.resolve(__dirname, '../../web');
-app.use(express.static(webPath));
+if (fs.existsSync(webPath)) {
+  app.use(express.static(webPath));
+}
 
 // Endpoint de estado y diagnóstico
 app.get('/api/health', (req, res) => {
